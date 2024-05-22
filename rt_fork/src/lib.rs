@@ -7,6 +7,8 @@ extern crate alloc;
 use core::panic::PanicInfo;
 use axtype::{align_up_4k, align_down_4k, phys_to_virt, virt_to_phys};
 use axhal::mem::memory_regions;
+use fork::user_mode_thread;
+use fork::CloneFlags;
 
 /// Entry
 #[no_mangle]
@@ -26,11 +28,29 @@ pub extern "Rust" fn runtime_main(cpu_id: usize, _dtb_pa: usize) {
     info!("Initialize kernel page table...");
     remap_kernel_memory().expect("remap kernel memoy failed");
 
-    task::init();
-    run_queue::init();
+    let idle = task::init();
+    run_queue::init(idle);
+
+    info!("start thread ...");
+    let tid = user_mode_thread(
+        move || {
+            kernel_init();
+        },
+        CloneFlags::CLONE_FS,
+    );
+    assert_eq!(tid, 1);
 
     info!("[rt_fork]: ok!");
     axhal::misc::terminate();
+}
+
+/// Prepare for entering first user app.
+fn kernel_init() {
+    info!("enter kernel_init ...");
+    let task = task::current();
+    task.set_state(taskctx::TaskState::Blocked);
+    let rq = run_queue::task_rq(&task.sched_info);
+    rq.lock().resched(false);
 }
 
 fn remap_kernel_memory() -> Result<(), axhal::paging::PagingError> {
