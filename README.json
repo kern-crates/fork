@@ -1,0 +1,11 @@
+{
+  "name": "fork",
+  "description": "Fork/clone systemcalls for monolithic kernel.",
+  "authors": [{
+    "name": "Shi Lei",
+    "email": "shi_lei@massclouds.com"
+  }],
+  "keywords": ["fork", "monolithic"],
+  "repo": "shilei-massclouds/fork",
+  "doc_url": "https://github.com/shilei-massclouds/fork/blob/main/README.md"
+}
