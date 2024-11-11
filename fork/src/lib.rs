@@ -120,8 +120,7 @@ impl KernelCloneArgs {
     /// that must be done for every newly created context, then puts the task
     /// on the runqueue and wakes it.
     fn wake_up_new_task(&self, task: TaskRef) {
-        let rq = run_queue::task_rq(&task.sched_info);
-        rq.lock().activate_task(task.sched_info.clone());
+        task::activate(task.clone());
         info!("wakeup the new task[{}].", task.tid());
     }
 
@@ -135,7 +134,7 @@ impl KernelCloneArgs {
 
         let mut task = current().dup_task_struct();
 
-        //copy_files();
+        self.copy_files(&mut task)?;
         self.copy_fs(&mut task)?;
         self.copy_sighand(&mut task)?;
         //copy_signal();
@@ -150,6 +149,18 @@ impl KernelCloneArgs {
         task::register_task(arc_task.clone());
         info!("copy_process tid: {} -> {}", current().tid(), arc_task.tid());
         Ok(arc_task)
+    }
+
+    fn copy_files(&self, task: &mut TaskStruct) -> LinuxResult {
+        if self.flags.contains(CloneFlags::CLONE_FILES) {
+            task.filetable = task::current().filetable.clone();
+            Ok(())
+        } else {
+            let current = task::current();
+            let src_files = current.filetable.lock();
+            task.filetable.lock().copy_from(&src_files);
+            Ok(())
+        }
     }
 
     fn copy_sighand(&self, task: &mut TaskStruct) -> LinuxResult {
@@ -230,7 +241,21 @@ impl KernelCloneArgs {
             };
 
         warn!("Todo: handle exit_signal {}", exit_signal);
-        arch::copy_thread(task, self, tid, tgid, set_child_tid, clear_child_tid, real_parent, group_leader)
+
+        let mut sched_info = run_queue::spawn_task(tid, self.entry);
+        sched_info.init_tgid(tgid);
+        sched_info.real_parent = real_parent;
+        sched_info.group_leader = group_leader;
+        sched_info.set_child_tid = set_child_tid;
+        sched_info.clear_child_tid = clear_child_tid;
+        if let Some(mm) = task.try_mm() {
+            let locked_mm = mm.lock();
+            sched_info.set_mm(locked_mm.id(), locked_mm.pgd());
+        }
+
+        arch::copy_thread(sched_info.pt_regs(), self)?;
+        task.sched_info = Arc::new(sched_info);
+        Ok(())
     }
 
     fn copy_mm(&self, task: &mut TaskStruct) -> LinuxResult {
@@ -259,30 +284,6 @@ impl KernelCloneArgs {
         task.fs.lock().copy_fs_struct(task::current().fs.clone());
         Ok(())
     }
-}
-
-// Todo: We should move task_entry to taskctx.
-// Now schedule_tail: 'run_queue::force_unlock();` hinders us.
-// Consider to move it to sched first!
-extern "C" fn task_entry() -> ! {
-    info!("################ task_entry ...");
-    // schedule_tail
-    // unlock runqueue for freshly created task
-    run_queue::force_unlock();
-
-    let task = crate::current();
-    if task.sched_info.set_child_tid != 0 {
-        let ctid_ptr = task.sched_info.set_child_tid as *mut usize;
-        unsafe { (*ctid_ptr) = task.sched_info.tid(); }
-    }
-
-    if let Some(entry) = task.sched_info.entry {
-        unsafe { Box::from_raw(entry)() };
-    }
-
-    let sp = task::current().pt_regs_addr();
-    axhal::arch::ret_from_fork(sp);
-    unimplemented!("task_entry!");
 }
 
 /// Create a user mode thread.
@@ -343,5 +344,14 @@ pub fn set_tid_address(tidptr: usize) -> usize {
     info!("set_tid_address: tidptr {:#X}", tidptr);
     let mut ctx = taskctx::current_ctx();
     ctx.as_ctx_mut().clear_child_tid = tidptr;
-    0
+    ctx.tid()
+}
+
+pub fn init(cpu_id: usize, dtb_pa: usize) {
+    axconfig::init_once!();
+
+    axlog2::init(option_env!("AX_LOG").unwrap_or(""));
+    axhal::arch_init_early(cpu_id);
+    axalloc::init();
+    task::init(cpu_id, dtb_pa);
 }
